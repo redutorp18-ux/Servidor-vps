@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent
-CONFIG = json.loads((ROOT / "config.json").read_text())
+ROOT = Path(__file__).resolve().parents[1]
+CONFIG = json.loads((ROOT / "server/config.json").read_text())
 DB_PATH = ROOT / CONFIG["database"]
 TOKEN_TTL = int(CONFIG.get("session_ttl_seconds", 86400))
 
@@ -85,6 +85,12 @@ class Store:
           x REAL NOT NULL DEFAULT 0, y REAL NOT NULL DEFAULT 0,
           hp INTEGER NOT NULL DEFAULT 100, updated_at INTEGER NOT NULL,
           PRIMARY KEY(match_id,user_id));
+        CREATE TABLE IF NOT EXISTS player_profiles(
+          user_id TEXT PRIMARY KEY, character_id TEXT NOT NULL DEFAULT 'default',
+          mode TEXT NOT NULL DEFAULT 'training', updated_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS inventory_items(
+          user_id TEXT NOT NULL, item_id TEXT NOT NULL, kind TEXT NOT NULL,
+          quantity INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id,item_id));
         """)
         self.db.commit()
 
@@ -125,6 +131,20 @@ class Store:
     def dequeue_user(self, user_id: str):
         self.db.execute("DELETE FROM matchmaking_queue WHERE user_id=?", (user_id,)); self.db.commit()
 
+    def ensure_profile(self, user_id: str):
+        self.db.execute("INSERT OR IGNORE INTO player_profiles(user_id,updated_at) VALUES(?,?)", (user_id, now()))
+        self.db.execute("INSERT OR IGNORE INTO inventory_items VALUES(?,?,?,?)", (user_id, "default_character", "character", 1))
+        self.db.commit()
+
+    def inventory(self, user_id: str):
+        self.ensure_profile(user_id)
+        rows = self.db.execute("SELECT item_id,kind,quantity FROM inventory_items WHERE user_id=? ORDER BY item_id", (user_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def online_users(self):
+        rows = self.db.execute("SELECT id,username,level,xp FROM users ORDER BY username").fetchall()
+        return [dict(row) for row in rows]
+
 
 class GameServer:
     def __init__(self):
@@ -152,7 +172,19 @@ class GameServer:
         if not u: return self.response(rid,False,error="unauthorized")
         uid=u["id"]
         if action == "heartbeat": return self.response(rid,server_time=now())
-        if action == "profile": return self.response(rid,user=self.public_user(u))
+        if action == "profile":
+            self.store.ensure_profile(uid)
+            profile = self.store.db.execute("SELECT character_id,mode,updated_at FROM player_profiles WHERE user_id=?", (uid,)).fetchone()
+            return self.response(rid,user=self.public_user(u),profile=dict(profile),inventory=self.store.inventory(uid))
+        if action == "inventory":
+            return self.response(rid, inventory=self.store.inventory(uid))
+        if action == "list_online":
+            return self.response(rid, players=self.store.online_users())
+        if action == "select_character":
+            character_id=str(req.get("character_id", "default"))[:64]
+            self.store.ensure_profile(uid)
+            self.store.db.execute("UPDATE player_profiles SET character_id=?,updated_at=? WHERE user_id=?", (character_id,now(),uid)); self.store.db.commit()
+            return self.response(rid,character_id=character_id)
         if action == "list_rooms": return self.response(rid,rooms=[self.room_json(x) for x in self.rooms.values()])
         if action == "queue_leave":
             self.store.dequeue_user(uid)
@@ -184,6 +216,16 @@ class GameServer:
             except (TypeError,ValueError): return self.response(rid,False,error="invalid_player_state")
             self.store.db.execute("UPDATE player_states SET x=?,y=?,hp=?,updated_at=? WHERE match_id=? AND user_id=?", (x,y,hp,now(),mid,uid)); self.store.db.commit()
             return self.response(rid,state={"match_id":mid,"user_id":uid,"x":x,"y":y,"hp":hp,"updated_at":now()})
+        if action == "apply_damage":
+            mid=str(req.get("match_id")); target=str(req.get("target_user_id", ""))
+            attacker=self.store.db.execute("SELECT 1 FROM match_players WHERE match_id=? AND user_id=?", (mid,uid)).fetchone()
+            victim=self.store.db.execute("SELECT hp FROM player_states WHERE match_id=? AND user_id=?", (mid,target)).fetchone()
+            if not attacker or not victim: return self.response(rid,False,error="not_match_player")
+            try: damage=max(0,min(100,int(req.get("damage",0))))
+            except (TypeError,ValueError): return self.response(rid,False,error="invalid_damage")
+            hp=max(0,int(victim["hp"])-damage)
+            self.store.db.execute("UPDATE player_states SET hp=?,updated_at=? WHERE match_id=? AND user_id=?", (hp,now(),mid,target)); self.store.db.commit()
+            return self.response(rid,damage=damage,target_user_id=target,hp=hp,eliminated=(hp==0))
         if action == "leave_match":
             mid=str(req.get("match_id")); self.store.db.execute("DELETE FROM match_players WHERE match_id=? AND user_id=?", (mid,uid)); self.store.db.execute("DELETE FROM player_states WHERE match_id=? AND user_id=?", (mid,uid)); self.store.db.commit()
             left=self.store.db.execute("SELECT COUNT(*) AS n FROM match_players WHERE match_id=?", (mid,)).fetchone()["n"]

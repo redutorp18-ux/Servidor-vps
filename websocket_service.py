@@ -10,8 +10,8 @@ import asyncio, json, os
 from pathlib import Path
 import sys
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "server"))
 import server as core
 
 try:
@@ -21,6 +21,7 @@ except ImportError as exc:  # pragma: no cover
 
 PORT = int(os.environ.get("PORT", "10000"))
 DB_PATH = Path(os.environ.get("FF170_DB_PATH", str(ROOT / "database" / "ff170-websocket.sqlite3")))
+BUILD_VERSION = os.environ.get("FF170_BUILD_VERSION", "phase-online-v2")
 core.DB_PATH = DB_PATH
 app = core.GameServer()
 
@@ -28,7 +29,10 @@ async def handler(ws):
     async for message in ws:
         try:
             request = json.loads(message)
-            response = await app.handle(request)
+            if request.get("action") == "health":
+                response = {"ok": True, "service": "ff170-independent-websocket", "build": BUILD_VERSION, "protocol": "FF170-Independent/1"}
+            else:
+                response = await app.handle(request)
         except json.JSONDecodeError:
             response = {"ok": False, "error": "invalid_json"}
         except Exception:
