@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent
 CONFIG = json.loads((ROOT / "config.json").read_text())
 DB_PATH = ROOT / CONFIG["database"]
 TOKEN_TTL = int(CONFIG.get("session_ttl_seconds", 86400))
