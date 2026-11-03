@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = json.loads((ROOT / "server/config.json").read_text())
+_config_candidates = (ROOT / "server/config.json", Path(__file__).resolve().with_name("config.json"), ROOT / "config.json")
+CONFIG_PATH = next((path for path in _config_candidates if path.exists()), _config_candidates[0])
+CONFIG = json.loads(CONFIG_PATH.read_text())
 DB_PATH = ROOT / CONFIG["database"]
 TOKEN_TTL = int(CONFIG.get("session_ttl_seconds", 86400))
 
